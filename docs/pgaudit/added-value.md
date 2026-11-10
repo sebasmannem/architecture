@@ -79,6 +79,68 @@ home-made solution needs much more justification.
 | **No alerting or analysis.** | It only writes records; nobody is notified when something suspicious happens. | SIEM rules and alerting. |
 | **Adds volume and some overhead.** | Broad `READ`/`WRITE` session logging can overload the log stream and slow down busy workloads. | Scope it as described in [limiting.md](limiting.md). |
 
+## In our environment
+
+### Role model
+
+| Role | Created by | Privileges | Used for |
+|---|---|---|---|
+| App team account | DBA team | `CREATEDB`, `CREATEROLE` (can create roles and grant to them) | App team creates the app role |
+| App role | App team | `CREATEDB`; owns the database and sets its permissions | Creates the database and grants access |
+| Migration role (optional) | App team | Can change the schema | Schema migrations, e.g. at application start-up |
+| Runtime role | App team | Read/write only | The application, mostly through PgBouncer |
+| Superuser | DBA team, **in some cases also the app team** | Everything | Administration |
+
+### What this means for auditing
+
+1. **Superuser access by app teams makes pgaudit unreliable for those
+   teams.** A superuser can switch auditing off for its own session or for
+   the whole cluster, and can run OS commands as the `postgres` user
+   (`COPY ... TO PROGRAM`), which includes editing local log files. For
+   clusters where an app team has superuser, pgaudit only shows what that
+   team *chooses* to leave visible. This must be stated explicitly in the
+   comply-or-explain documentation. The default should be **no superuser
+   for app teams**, with exceptions documented per cluster.
+
+2. **`CREATEROLE` is close to superuser before PostgreSQL 16.** Up to
+   PostgreSQL 15, a role with `CREATEROLE` can grant itself or other roles
+   membership in almost any non-superuser role. That includes
+   `pg_execute_server_program`, which allows OS commands, with the same
+   consequences as point 1. PostgreSQL 16 changed this: a `CREATEROLE` role
+   then only manages roles it created itself. **On clusters older than
+   PostgreSQL 16, treat app team accounts as near-superuser for audit
+   purposes.**
+
+3. **App teams cannot lower the audit settings.** `pgaudit.*` settings are
+   superuser-only, so `CREATEROLE` is not enough to run
+   `ALTER ROLE ... SET pgaudit.log = 'none'` (unless someone has explicitly
+   run `GRANT SET ON PARAMETER`, which should not be done for `pgaudit.*`).
+
+4. **Schema migrations are covered by cluster-wide DDL logging.** App teams
+   create their own migration roles, so the DBA team doesn't know their
+   names and can't set per-role audit settings on them. That's fine:
+   `pgaudit.log = 'ddl, role'` cluster-wide (see
+   [limiting.md](limiting.md)) captures every migration, whichever role
+   runs it. Role creation and grants by the app team account and app role are captured by
+   the `ROLE` class.
+
+5. **App teams can switch off object auditing on their own tables.** The
+   app team owns the tables, and a table owner can `REVOKE` privileges from
+   the `auditor` role, silently ending object auditing for that table.
+   The `REVOKE` itself is logged (class `ROLE`), so add a **SIEM alert on
+   `GRANT`/`REVOKE` statements involving the audit role**.
+
+6. **Runtime activity shows the runtime role and the PgBouncer host, not a
+   person.** For the runtime role, pgaudit answers "did the application do
+   this?", not "who did it?". End-user accountability has to come from the
+   application's own audit trail. Migrations run from a CI/CD pipeline are
+   traceable to the pipeline run, not to a person.
+
+7. **The split between migration and runtime roles helps.** Schema changes
+   come from one role and data access from another, which makes the audit
+   records easier to interpret and to alert on, for example DDL from the
+   runtime role is always suspicious.
+
 ## When pgaudit isn't worth it
 
 - **Clusters with no sensitive data and no audit requirement** (for example
