@@ -42,6 +42,79 @@ the difference between "nothing happened" and "we lost it". **For audit
 data, choose backpressure, and then size everything so that backpressure
 doesn't actually happen.**
 
+### First priority: make loss detectable
+
+No log path is guaranteed never to lose records. Even the logging collector
+loses them when its filesystem is full, and the shipper, network and SIEM
+can all fail further down the line. The real compliance risk is therefore
+not loss itself, but **loss nobody notices**: then the whole audit trail
+becomes untrustworthy, because "nothing happened" and "we lost it" look the
+same. Loss that is detected, with the sessions and time window it affected,
+can be explained in a comply-or-explain discussion.
+
+The measures below detect loss **regardless of the log path**. They work
+with the current journal setup.
+
+1. **Number every log line per session.** `%l` in `log_line_prefix` gives
+   each log line a per-session (or per-process) number starting at 1, and
+   `%c` adds a unique session ID:
+
+   ```ini
+   log_line_prefix = '%m [%p] %c %l %q%u@%d '
+   ```
+
+   `jsonlog` and `csvlog` include both fields automatically
+   (`session_id`, `line_num`). The number is assigned inside PostgreSQL,
+   *before* the line enters the log path, so anything dropped afterwards
+   leaves a gap. In the SIEM, a session with a gap in its line numbers
+   (…41, 42, 45…) has **provably lost lines**.
+
+2. **Log connections and disconnections** (`log_connections = on`,
+   `log_disconnections = on`). Every session then has a known first and
+   last line. A session without a disconnection record has lost its tail,
+   or the server crashed, which is visible elsewhere.
+
+3. **Count sessions as a cross-check.** `pg_stat_database.sessions`
+   (PostgreSQL 14+) counts every session. Collect it with your metrics. If
+   the SIEM saw fewer sessions than PostgreSQL counted for the same period,
+   whole sessions were lost.
+
+4. **Send a heartbeat from start to finish.** A scheduled job runs an
+   audited statement every minute, for example a `SELECT` on a canary table
+   covered by object logging (`GRANT SELECT ON audit.canary TO auditor`).
+   The SIEM alerts if a heartbeat doesn't arrive in time. This catches
+   what line numbering can't:
+   - the pipeline is down;
+   - auditing was switched off or reconfigured;
+   - the journal or shipper has stalled.
+
+   Run the heartbeat against every Patroni node, including replicas,
+   because each node has its own log path.
+
+5. **Use drop warnings as signals.** Alert on journald's
+   `Suppressed N messages` lines, and on gaps in syslog sequence numbers
+   (`syslog_sequence_numbers = on`) if syslog is ever used.
+
+| Detected by | What it detects |
+|---|---|
+| Line-number gaps | Lines lost in the middle of a session |
+| Missing disconnection record | Lines lost at the end of a session |
+| Session count mismatch | Whole sessions lost |
+| Missing heartbeat | Pipeline down, auditing disabled, delivery stalled |
+| journald/syslog warnings | Drops in the transport, as reported by the transport itself |
+
+**Who does what:** the PostgreSQL side (settings in Patroni, canary table,
+heartbeat job) is entirely DBA work and can be done now. The gap,
+session-count and heartbeat checks are SIEM rules, built by whoever runs
+the SIEM.
+
+**Verify before relying on it:** on a test cluster, force a drop (for
+example by setting a very low journald rate limit) and check that it shows
+up as a line-number gap and triggers the alert.
+
+The measures in the rest of this document then **reduce how often** loss
+happens. They no longer have to be trusted to prevent it.
+
 ### How much volume are we talking about?
 
 A rough estimate for the 1 GB/minute team, if every DML statement is
@@ -152,17 +225,23 @@ problem.
 
 ## Recommendation
 
-1. Move PostgreSQL logging from the journal to the **logging collector**,
+1. **Make loss detectable first**, on the current journal setup: per-session
+   line numbers in `log_line_prefix`, connection and disconnection logging,
+   a session-count cross-check and a heartbeat on every node, with SIEM
+   rules that alert on gaps and missing heartbeats. Test it with a forced
+   drop.
+2. **Measure** the statement rate before agreeing on what to audit. For
+   "every DML" at this team's volume, propose **CDC** instead of pgaudit.
+3. Lift the journald rate limit for Patroni as a quick win.
+4. Move PostgreSQL logging from the journal to the **logging collector**,
    writing `jsonlog` to a dedicated filesystem outside PGDATA.
-2. Have the Linux team set up a **file-based shipper** with position
+5. Have the Linux team set up a **file-based shipper** with position
    tracking, a separate audit output with a disk buffer, and cleanup only
    of shipped files.
-3. **Measure** the statement rate before agreeing on what to audit. For
-   "every DML" at this team's volume, propose **CDC** instead of pgaudit.
-4. **Monitor** filesystem usage, shipper lag and logging waits, and alert
+6. **Monitor** filesystem usage, shipper lag and logging waits, and alert
    on them.
-5. Until this is in place, lift the journald rate limit for Patroni and
-   document the remaining risk in the comply-or-explain documentation.
+7. In the comply-or-explain documentation, describe how loss is detected
+   and how detected loss is handled, rather than claiming it can't happen.
 
 ## CloudNativePG (outlook)
 
