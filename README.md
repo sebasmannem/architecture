@@ -21,8 +21,10 @@ Topics include, but are not limited to:
 
 ## Structure
 
-Each topic gets its own directory or Markdown document. A document
-generally covers:
+See the [index of subjects](docs/README.md).
+
+Each subject has its own directory under `docs/`, with an overview and one
+document per question. A document generally covers:
 
 1. **Question**: what problem are we trying to solve?
 2. **Context**: constraints, requirements and assumptions
