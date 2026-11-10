@@ -28,6 +28,7 @@ Architectural questions about auditing PostgreSQL with
 | 2 | Can pgaudit write audit records to a separate file or stream? | [separate-files.md](separate-files.md) |
 | 3 | What does pgaudit add, and what doesn't it do? | [added-value.md](added-value.md) |
 | 4 | How do we keep the log stream from losing audit records? | [log-stream.md](log-stream.md) |
+| 5 | What's different for pgaudit on CloudNativePG? | [cnpg.md](cnpg.md) |
 
 ## Key conclusions
 
@@ -51,8 +52,14 @@ Architectural questions about auditing PostgreSQL with
    and a file-based shipper reduce how often loss happens. For "audit every
    DML" at high volume, CDC is a better fit than pgaudit.
    ([log-stream.md](log-stream.md))
+5. **On CNPG, enabling pgaudit is easier, but control moves to
+   Kubernetes.** Logging is fixed to JSON on stdout, effective superuser
+   becomes anyone with `pods/exec` or write access to the `Cluster`
+   resource, and the Kubernetes API audit log becomes part of the audit
+   trail. Container log rotation and pod deletion are the main risks of
+   losing records at high volume. ([cnpg.md](cnpg.md))
 
 ## Open points
 
-- CloudNativePG logging at high volume (Kubernetes log rotation can
-  discard records before they're shipped) needs its own answer.
+- Container log limits and log shipper capacity for high-volume clusters
+  on CNPG need to be agreed with the Kubernetes platform team.
